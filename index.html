@@ -1,0 +1,1053 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gambit System Backend</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Crimson+Text:wght@400;600;700&family=Lato:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body class="bg-gray-900 text-white overflow-hidden">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- Constants & Helpers ---
+
+        const SUITS = [
+            { symbol: '♠', color: 'black', type: 'spades' },
+            { symbol: '♣', color: 'black', type: 'clubs' },
+            { symbol: '♥', color: 'red', type: 'hearts' },
+            { symbol: '♦', color: 'red', type: 'diamonds' }
+        ];
+
+        const RANKS = [
+            { label: 'A', value: 1, type: 'Ace' },
+            { label: '2', value: 2, type: 'Number' },
+            { label: '3', value: 3, type: 'Number' },
+            { label: '4', value: 4, type: 'Number' },
+            { label: '5', value: 5, type: 'Number' },
+            { label: '6', value: 6, type: 'Number' },
+            { label: '7', value: 7, type: 'Number' },
+            { label: '8', value: 8, type: 'Number' },
+            { label: '9', value: 9, type: 'Number' },
+            { label: '10', value: 10, type: 'Number' },
+            { label: 'J', value: 11, type: 'Jack' },
+            { label: 'Q', value: 12, type: 'Royalty' },
+            { label: 'K', value: 13, type: 'Royalty' }
+        ];
+
+        const createDeck = () => {
+            let deck = [];
+            let id = 0;
+            SUITS.forEach(suit => {
+                RANKS.forEach(rank => {
+                    deck.push({
+                        id: `card-${id++}`,
+                        suit: suit.symbol,
+                        color: suit.color,
+                        label: rank.label,
+                        type: rank.type,
+                        baseValue: rank.value,
+                        pointValue: suit.color === 'black' ? rank.value : -rank.value
+                    });
+                });
+            });
+            return deck;
+        };
+
+        const shuffleDeck = (deck) => {
+            let newDeck = [...deck];
+            for (let i = newDeck.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [newDeck[i], newDeck[j]] = [newDeck[j], newDeck[i]];
+            }
+            return newDeck;
+        };
+
+        // Helper to prevent duplicates in piles
+        const uniqueDeck = (cards) => {
+            const seen = new Set();
+            return cards.filter(c => {
+                if (seen.has(c.id)) return false;
+                seen.add(c.id);
+                return true;
+            });
+        };
+
+        const calculateHandScore = (cards, jackValues = {}, isSystem = false) => {
+            let hasBlackRoyalty = false;
+            let hasRedRoyalty = false;
+            let score = 0;
+
+            cards.forEach(card => {
+                if (card.type === 'Royalty') {
+                    if (card.color === 'black') hasBlackRoyalty = true;
+                    if (card.color === 'red') hasRedRoyalty = true;
+                } else if (card.type === 'Jack') {
+                    if (isSystem) {
+                        // System Optimal Strategy: Black=5 (Max Pos), Red=-1 (Max Neg / Closest to 0)
+                        score += (card.color === 'black' ? 5 : -1);
+                    } else {
+                        const val = jackValues[card.id] !== undefined ? jackValues[card.id] : card.pointValue;
+                        score += val;
+                    }
+                } else {
+                    score += card.pointValue;
+                }
+            });
+
+            return { score, hasBlackRoyalty, hasRedRoyalty };
+        };
+
+        // --- Styles ---
+        const styles = `
+            .card-font { font-family: 'Crimson Text', serif; }
+            .wood-texture {
+                background-color: #3e2723;
+                background-image: url("data:image/svg+xml,%3Csvg width='40' height='40' viewBox='0 0 40 40' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M20 20c0-11.05 8.95-20 20-20s20 8.95 20 20-8.95 20-20 20-20-8.95-20-20zm0 0c0-11.05-8.95-20-20-20S0 8.95 0 20s8.95 20 20 20 20-8.95 20-20z' fill='%235d4037' fill-opacity='0.1' fill-rule='evenodd'/%3E%3C/svg%3E");
+            }
+            .felt-texture {
+                background-color: #2e7d32;
+                background-image: radial-gradient(#388e3c 15%, transparent 16%), radial-gradient(#388e3c 15%, transparent 16%);
+                background-size: 20px 20px;
+                background-position: 0 0, 10px 10px;
+            }
+            .scrollbar-hide::-webkit-scrollbar { display: none; }
+            .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        `;
+
+        // --- Modals ---
+
+        const Modal = ({ children }) => (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+                <div className="bg-slate-800 border border-slate-600 rounded-xl p-6 shadow-2xl max-w-md w-full animate-in zoom-in duration-200">
+                    {children}
+                </div>
+            </div>
+        );
+
+        // --- Components ---
+
+        const Card = ({ card, isSelected, isLocked, onClick, isFaceUp = true, isSmall = false, canSelect = true, customValue }) => {
+            if (!card) return <div className={`border-2 border-dashed border-white/20 rounded-lg ${isSmall ? 'w-16 h-24' : 'w-24 h-36'}`}></div>;
+
+            if (!isFaceUp) {
+                return (
+                    <div onClick={canSelect ? onClick : undefined} className={`relative ${isSmall ? 'w-16 h-24' : 'w-24 h-36'} ${isSelected ? 'ring-4 ring-red-500 transform -translate-y-4' : ''} bg-blue-800 rounded-lg border-2 border-white shadow-md flex items-center justify-center transition-all duration-200`}>
+                        <div className="w-full h-full border-2 border-blue-600 rounded-md bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjgiPgo8cmVjdCB3aWR0aD0iOCIgaGVpZ2h0PSI4IiBmaWxsPSIjMWU0MGFmIj48L3JlY3Q+CjxwYXRoIGQ9Ik0wIDBMOCA4Wk04IDBMMCA4WiIgc3Ryb2tlPSIjMWQ0ZWQ4IiBzdHJva2Utd2lkdGg9IjEiPjwvcGF0aD4KPC9zdmc+')] opacity-50"></div>
+                    </div>
+                );
+            }
+
+            return (
+                <div 
+                    onClick={onClick}
+                    className={`
+                        relative ${isSmall ? 'w-16 h-24 text-base' : 'w-24 h-36 text-2xl'} 
+                        rounded-lg shadow-lg cursor-pointer transition-all duration-200 transform select-none
+                        flex flex-col items-center justify-between p-2 card-font bg-white
+                        ${isSelected ? 'ring-4 ring-yellow-400 -translate-y-4 shadow-yellow-400/50' : 'hover:-translate-y-1 hover:shadow-xl'}
+                        ${isLocked ? 'ring-4 ring-orange-500 bg-orange-50' : ''}
+                        ${card.color === 'red' ? 'text-red-600' : 'text-slate-900'}
+                    `}
+                >
+                    <div className="self-start leading-none font-bold">{card.label}</div>
+                    <div className="text-4xl">{card.suit}</div>
+                    <div className="self-end leading-none font-bold rotate-180">{card.label}</div>
+                    {isLocked && <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-20 text-4xl">🔒</div>}
+                    {customValue !== undefined && <div className="absolute top-1 right-1 text-xs bg-black/80 text-white px-1 rounded">{customValue > 0 ? '+' : ''}{customValue}</div>}
+                </div>
+            );
+        };
+
+        const DeckPile = ({ count, label, onClick, showShuffle }) => {
+            return (
+                <div className="flex flex-col items-center gap-2">
+                    <div className="relative w-28 h-40" onClick={onClick}>
+                        {count > 0 && Array.from({ length: Math.min(count, 5) }).map((_, i) => (
+                            <div key={i} className="absolute w-24 h-36 bg-blue-800 rounded-lg border border-white shadow-md" style={{ top: `${i * 2}px`, left: `${i * 2}px`, zIndex: i }}>
+                                <div className="w-full h-full rounded-md bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjgiPgo8cmVjdCB3aWR0aD0iOCIgaGVpZ2h0PSI4IiBmaWxsPSIjMWU0MGFmIj48L3JlY3Q+CjxwYXRoIGQ9Ik0wIDBMOCA4Wk04IDBMMCA4WiIgc3Ryb2tlPSIjMWQ0ZWQ4IiBzdHJva2Utd2lkdGg9IjEiPjwvcGF0aD4KPC9zdmc+')] opacity-30"></div>
+                            </div>
+                        ))}
+                        {count === 0 && (
+                            <div className="absolute top-0 left-0 w-24 h-36 border-2 border-dashed border-white/30 rounded-lg flex items-center justify-center"><span className="text-white/30 text-sm">Empty</span></div>
+                        )}
+                        <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2 text-white font-bold text-sm bg-black/60 px-2 py-1 rounded shadow-lg z-20 whitespace-nowrap backdrop-blur-sm">
+                            {count} Cards
+                        </div>
+                    </div>
+                    <div className="flex flex-col items-center">
+                        <h3 className="text-white font-bold tracking-wider text-sm uppercase mt-1">{label}</h3>
+                        {showShuffle && count > 0 && <button onClick={(e) => { e.stopPropagation(); onClick(); }} className="mt-1 px-2 py-0.5 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded shadow">Shuffle</button>}
+                    </div>
+                </div>
+            );
+        };
+
+        const Numpad = ({ value, setValue }) => {
+            const append = (num) => setValue(prev => prev === '0' ? num : prev + num);
+            const toggleSign = () => setValue(prev => prev.startsWith('-') ? prev.substring(1) : '-' + prev);
+            const backspace = () => setValue(prev => prev.length > 1 ? prev.slice(0, -1) : '0');
+
+            return (
+                <div className="bg-slate-800 rounded-xl p-4 border border-slate-600 flex gap-4">
+                    <div className="w-48">
+                        <div className="bg-black/50 text-green-400 font-mono text-3xl p-2 rounded mb-2 text-right overflow-hidden">{value || '0'}</div>
+                        <div className="grid grid-cols-3 gap-2">
+                            {[7,8,9,4,5,6,1,2,3].map(num => (
+                                <button key={num} onClick={() => append(num.toString())} className="bg-slate-700 hover:bg-slate-600 text-white p-2 rounded font-bold transition-colors">{num}</button>
+                            ))}
+                            <button onClick={toggleSign} className="bg-slate-600 hover:bg-slate-500 text-white p-2 rounded">+/-</button>
+                            <button onClick={() => append('0')} className="bg-slate-700 hover:bg-slate-600 text-white p-2 rounded font-bold">0</button>
+                            <button onClick={backspace} className="bg-red-900/50 hover:bg-red-900/80 text-white p-2 rounded">⌫</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const App = () => {
+            // --- Save System ---
+            const [activeProfile, setActiveProfile] = useState(1);
+            const [isSaveMenuOpen, setIsSaveMenuOpen] = useState(false);
+            const [isLoaded, setIsLoaded] = useState(false);
+
+            // --- Game State ---
+            const [mainDeck, setMainDeck] = useState([]);
+            const [graveyard, setGraveyard] = useState([]);
+            
+            const [playerHand, setPlayerHand] = useState([]);
+            const [systemHand, setSystemHand] = useState([]);
+            
+            const [selectedPlayerCardIds, setSelectedPlayerCardIds] = useState(new Set());
+            const [selectedSystemCardIds, setSelectedSystemCardIds] = useState(new Set()); 
+            
+            const [jackValues, setJackValues] = useState({}); 
+
+            const [encounterActive, setEncounterActive] = useState(false);
+            const [manualMode, setManualMode] = useState(false);
+            const [manualTargetValue, setManualTargetValue] = useState('0');
+            const [conditionals, setConditionals] = useState({ x: 1, y: 0 });
+
+            const [turnResult, setTurnResult] = useState(null);
+            const [logs, setLogs] = useState([]);
+            
+            const [modal, setModal] = useState(null); 
+            const [systemPendingCritFail, setSystemPendingCritFail] = useState(false);
+            
+            const logEndRef = useRef(null);
+
+            // --- Initialization & Saving ---
+            useEffect(() => {
+                setIsLoaded(false);
+                const saveKey = `card_game_save_${activeProfile}`;
+                const savedData = localStorage.getItem(saveKey);
+                if (savedData) {
+                    try {
+                        const data = JSON.parse(savedData);
+                        setMainDeck(uniqueDeck(data.mainDeck || []));
+                        setGraveyard(uniqueDeck(data.graveyard || []));
+                        setPlayerHand(uniqueDeck(data.playerHand || []));
+                        setSystemHand(uniqueDeck(data.systemHand || []));
+                        const loadedCond = data.conditionals || { x: 1, y: 0 };
+                        setConditionals({ x: parseInt(loadedCond.x), y: parseInt(loadedCond.y) });
+                        setLogs(data.logs || []);
+                        setEncounterActive(data.encounterActive || false);
+                        setManualMode(data.manualMode || false);
+                        setManualTargetValue(data.manualTargetValue || '0');
+                        setJackValues(data.jackValues || {});
+                        setSystemPendingCritFail(data.systemPendingCritFail || false);
+                        setSelectedPlayerCardIds(new Set());
+                        setSelectedSystemCardIds(new Set());
+                        setTurnResult(null);
+                        setLogs(prev => [...(data.logs || []), { id: Date.now() + Math.random(), text: `Profile ${activeProfile} Loaded.`, type: 'system' }]);
+                    } catch (e) { resetGame(false); }
+                } else { resetGame(false); }
+                setIsLoaded(true);
+            }, [activeProfile]);
+
+            useEffect(() => {
+                if (!isLoaded) return;
+                const gameState = {
+                    mainDeck, graveyard, playerHand, systemHand, conditionals, logs, encounterActive, manualMode, manualTargetValue, jackValues, systemPendingCritFail,
+                    timestamp: Date.now()
+                };
+                localStorage.setItem(`card_game_save_${activeProfile}`, JSON.stringify(gameState));
+            }, [mainDeck, graveyard, playerHand, systemHand, conditionals, logs, encounterActive, manualMode, manualTargetValue, jackValues, systemPendingCritFail, activeProfile, isLoaded]);
+
+            useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
+
+            // --- Auto Actions (System) ---
+
+            useEffect(() => {
+                if (!encounterActive || manualMode) return;
+                
+                const blackAces = systemHand.filter(c => c.type === 'Ace' && c.color === 'black');
+                const redAces = systemHand.filter(c => c.type === 'Ace' && c.color === 'red');
+
+                if (blackAces.length > 0) {
+                    log("System plays Black Ace! Refreshing System Hand.", 'danger');
+                    recycleAndRefillHand('system', 'self'); 
+                    return; 
+                }
+                if (redAces.length > 0) {
+                    log("System plays Red Ace! Refreshing Player Hand.", 'danger');
+                    recycleAndRefillHand('player', 'opponent');
+                    return;
+                }
+
+            }, [systemHand, encounterActive, manualMode]);
+
+            // --- Auto Actions (Player - Y Lock Detection) ---
+            useEffect(() => {
+                if (!isLoaded || playerHand.length === 0) return;
+                
+                // 1. Identify Auto-Selected Cards
+                const autoSelectedIds = new Set();
+                const limit = Math.min(conditionals.y, playerHand.length);
+                
+                // Check if any specific card needs a prompt
+                for(let i=0; i<limit; i++) {
+                    const c = playerHand[i];
+                    autoSelectedIds.add(c.id);
+
+                    // Check for Auto-Ace
+                    if (c.type === 'Ace' && !modal) {
+                         setModal({
+                            type: 'ACE_AUTO',
+                            card: c
+                         });
+                         return; // Wait for user interaction
+                    }
+
+                    // Check for Auto-Jack
+                    if (c.type === 'Jack' && jackValues[c.id] === undefined && !modal) {
+                         setModal({
+                            type: 'JACK_AUTO',
+                            card: c,
+                            isRed: c.color === 'red',
+                            currentValue: c.color === 'red' ? -1 : 1
+                         });
+                         return;
+                    }
+                }
+                
+                // 2. Sync Selection State
+                setSelectedPlayerCardIds(prev => {
+                    const next = new Set(autoSelectedIds);
+                    // Fill remaining spots with manual selections if valid
+                    let needed = conditionals.x - limit;
+                    for (let id of prev) {
+                        if (needed <= 0) break;
+                        if (!autoSelectedIds.has(id)) {
+                            next.add(id);
+                            needed--;
+                        }
+                    }
+                    return next;
+                });
+
+                // System Manual Mode Sync
+                if (manualMode && encounterActive) {
+                    const sysLimit = Math.min(conditionals.y, systemHand.length);
+                    const sysAutoIds = new Set();
+                    for(let i=0; i<sysLimit; i++) {
+                        sysAutoIds.add(systemHand[i].id);
+                    }
+                    setSelectedSystemCardIds(prev => {
+                        const next = new Set(sysAutoIds);
+                        let needed = conditionals.x - sysLimit;
+                        for (let id of prev) {
+                            if (needed <= 0) break;
+                            if (!sysAutoIds.has(id)) {
+                                next.add(id);
+                                needed--;
+                            }
+                        }
+                        return next;
+                    });
+                } else {
+                    setSelectedSystemCardIds(new Set());
+                }
+
+            }, [playerHand, systemHand, conditionals, manualMode, encounterActive, isLoaded, jackValues, modal]); 
+
+
+            // --- Core Logic ---
+
+            const log = (message, type = 'neutral') => setLogs(prev => [...prev, { id: Date.now() + Math.random(), text: message, type }]);
+
+            const resetGame = (isStopEncounter = false) => {
+                let deck = createDeck();
+                deck = shuffleDeck(deck);
+                const pHand = deck.slice(0, 5);
+                const sHand = deck.slice(5, 10);
+                const remainingDeck = deck.slice(10);
+                setMainDeck(remainingDeck);
+                setPlayerHand(pHand);
+                setSystemHand(sHand);
+                setGraveyard([]);
+                setSelectedPlayerCardIds(new Set());
+                setSelectedSystemCardIds(new Set());
+                setJackValues({});
+                setTurnResult(null);
+                setSystemPendingCritFail(false);
+                setModal(null);
+                
+                if (isStopEncounter) {
+                    setEncounterActive(false);
+                    log("Encounter stopped. Deck reset.", 'system');
+                } else {
+                    setLogs([{ id: Date.now() + Math.random(), text: "Welcome. Press 'Start Enc.' to begin.", type: 'system' }]);
+                }
+            };
+
+            const toggleEncounter = () => {
+                if (encounterActive) resetGame(true);
+                else {
+                    setEncounterActive(true);
+                    setTurnResult(null);
+                    setLogs([]);
+                    log("Encounter Started!", 'success');
+                }
+            };
+
+            const drawFromDeck = (deck, grave, count) => {
+                let d = [...deck];
+                let g = uniqueDeck([...grave]); // Ensure unique
+                let drawn = [];
+                for(let i=0; i<count; i++) {
+                    if (d.length === 0) {
+                        if (g.length === 0) break;
+                        d = shuffleDeck([...g]);
+                        g = [];
+                    }
+                    drawn.push(d.pop());
+                }
+                return { drawn, deck: d, graveyard: g };
+            };
+
+            const recycleAndRefillHand = (target, source) => {
+                let currentHand = target === 'player' ? playerHand : systemHand;
+                let currentDeck = [...mainDeck];
+                let currentGraveyard = [...graveyard];
+
+                const cardsToDiscard = [...currentHand];
+                // Deduplicate graveyard push
+                currentGraveyard = uniqueDeck([...currentGraveyard, ...cardsToDiscard]);
+
+                const res = drawFromDeck(currentDeck, currentGraveyard, 5);
+                
+                let newHand = res.drawn;
+
+                // --- SYSTEM DUPLICATE CHECK (Black Royalty) during Refill ---
+                if (target === 'system') {
+                    // Check if new hand has > 1 Black Royalty
+                    let blackRoyaltyCount = newHand.filter(c => c.type === 'Royalty' && c.color === 'black').length;
+                    
+                    // While loop to resolve duplicates immediately
+                    let tempDeck = res.deck;
+                    let tempGrav = res.graveyard;
+                    
+                    while (blackRoyaltyCount > 1) {
+                         // Find index of last black royalty
+                         const idx = newHand.findIndex(c => c.type === 'Royalty' && c.color === 'black');
+                         // Discard it
+                         const discarded = newHand.splice(idx, 1)[0];
+                         tempGrav.push(discarded);
+                         
+                         // Draw replacement
+                         const drawRes = drawFromDeck(tempDeck, tempGrav, 1);
+                         tempDeck = drawRes.deck;
+                         tempGrav = drawRes.graveyard;
+                         if (drawRes.drawn.length > 0) {
+                             newHand.push(drawRes.drawn[0]);
+                         }
+                         // Re-check count
+                         blackRoyaltyCount = newHand.filter(c => c.type === 'Royalty' && c.color === 'black').length;
+                    }
+                    setMainDeck(tempDeck);
+                    setGraveyard(tempGrav);
+                } else {
+                    setMainDeck(res.deck);
+                    setGraveyard(res.graveyard);
+                }
+
+                if (target === 'player') {
+                    setPlayerHand(newHand);
+                    setSelectedPlayerCardIds(new Set()); 
+                } else {
+                    setSystemHand(newHand);
+                    setSelectedSystemCardIds(new Set());
+                }
+            };
+
+            const handleAceEffect = (card) => {
+                setModal(null); 
+                
+                if (card.color === 'black') {
+                    log("Black Ace Played. Your Hand Discarded & Redrawn.", 'success');
+                    recycleAndRefillHand('player', 'self'); 
+                } else {
+                    log("Red Ace Played. System Hand Discarded & Redrawn.", 'success');
+                    
+                    let newPHand = playerHand.filter(c => c.id !== card.id);
+                    let grav = uniqueDeck([...graveyard, card]);
+                    let deck = [...mainDeck];
+
+                    const res1 = drawFromDeck(deck, grav, 1);
+                    newPHand = uniqueDeck([...newPHand, ...res1.drawn]);
+                    grav = res1.graveyard;
+                    deck = res1.deck;
+
+                    const sysDiscard = [...systemHand];
+                    grav = uniqueDeck([...grav, ...sysDiscard]);
+                    const res2 = drawFromDeck(deck, grav, 5);
+                    
+                    // Note: recycleAndRefillHand handles system logic better, but here we manually did it.
+                    // Let's add the System Black Royalty Check manually here for safety.
+                    let sysHand = res2.drawn;
+                    let blackRoyaltyCount = sysHand.filter(c => c.type === 'Royalty' && c.color === 'black').length;
+                    let tDeck = res2.deck;
+                    let tGrav = res2.graveyard;
+
+                    while (blackRoyaltyCount > 1) {
+                         const idx = sysHand.findIndex(c => c.type === 'Royalty' && c.color === 'black');
+                         const discarded = sysHand.splice(idx, 1)[0];
+                         tGrav.push(discarded);
+                         const dRes = drawFromDeck(tDeck, tGrav, 1);
+                         tDeck = dRes.deck;
+                         tGrav = dRes.graveyard;
+                         if (dRes.drawn.length > 0) sysHand.push(dRes.drawn[0]);
+                         blackRoyaltyCount = sysHand.filter(c => c.type === 'Royalty' && c.color === 'black').length;
+                    }
+
+                    setPlayerHand(newPHand);
+                    setSystemHand(sysHand);
+                    setGraveyard(tGrav);
+                    setMainDeck(tDeck);
+                    setSelectedPlayerCardIds(new Set());
+                }
+            };
+
+            const handleCardSelect = (card, isPlayer) => {
+                const canAct = encounterActive || (manualMode && !encounterActive && isPlayer);
+                if (!canAct) return;
+
+                // Priority 1: Ace Check (Manual Modal)
+                if (isPlayer && card.type === 'Ace') {
+                    setModal({ type: 'ACE_MANUAL', card });
+                    return; 
+                }
+
+                // Priority 2: Locked check for normal cards
+                const hand = isPlayer ? playerHand : systemHand;
+                const index = hand.findIndex(c => c.id === card.id);
+                if (index < conditionals.y) return; 
+
+                const currentSet = isPlayer ? selectedPlayerCardIds : selectedSystemCardIds;
+                const setFunction = isPlayer ? setSelectedPlayerCardIds : setSelectedSystemCardIds;
+
+                // Jack Logic (Toggle)
+                if (isPlayer && card.type === 'Jack') {
+                    if (currentSet.has(card.id)) {
+                        setFunction(prev => {
+                            const newSet = new Set(prev);
+                            newSet.delete(card.id);
+                            return newSet;
+                        });
+                        return;
+                    }
+                    setModal({
+                        type: 'JACK',
+                        cardId: card.id,
+                        isRed: card.color === 'red',
+                        currentValue: jackValues[card.id] || (card.color === 'red' ? -1 : 1)
+                    });
+                    return;
+                }
+
+                setFunction(prev => {
+                    const newSet = new Set(prev);
+                    if (newSet.has(card.id)) {
+                        newSet.delete(card.id);
+                    } else {
+                        if (newSet.size < conditionals.x) {
+                            newSet.add(card.id);
+                        } else {
+                             log("Limit Reached. Deselect a card first.", 'neutral');
+                        }
+                    }
+                    return newSet;
+                });
+            };
+
+            const confirmJackValue = (cardId, val) => {
+                setJackValues(prev => ({ ...prev, [cardId]: val }));
+                setModal(null);
+                
+                setSelectedPlayerCardIds(prev => {
+                    if (prev.size < conditionals.x) return new Set(prev).add(cardId);
+                    log("Jack value set. Selection limit reached, Jack not selected automatically.", 'neutral');
+                    return prev;
+                });
+            };
+
+            const endTurn = () => {
+                if (selectedPlayerCardIds.size !== conditionals.x) {
+                    log(`Error: Selected ${selectedPlayerCardIds.size}/${conditionals.x} cards (Auto: ${conditionals.y}).`, 'danger');
+                    return;
+                }
+
+                // --- Number Check Mode ---
+                if (manualMode && !encounterActive) {
+                    const pCards = playerHand.filter(c => selectedPlayerCardIds.has(c.id));
+                    const pRes = calculateHandScore(pCards, jackValues);
+                    const target = parseInt(manualTargetValue);
+                    
+                    let winner = 'draw', detail = '';
+                    if (pRes.score === 0 || pRes.hasBlackRoyalty) { winner='player'; detail="Critical Success (0)!"; }
+                    else if (pRes.score === -1) { winner='system'; detail="Critical Failure (-1)!"; } 
+                    else {
+                        if (pRes.score >= 0 && target < 0) { winner='player'; detail="Positive beats Negative."; }
+                        else if (target >= 0 && pRes.score < 0) { winner='system'; detail="Positive beats Negative."; }
+                        else if (pRes.score >= 0 && target >= 0) {
+                            if (pRes.score < target) { winner='player'; detail=`Success! ${pRes.score} vs ${target}`; }
+                            else if (target < pRes.score) { winner='system'; detail=`Fail. ${pRes.score} vs ${target}`; }
+                            else detail=`Tie. ${pRes.score} vs ${target}`;
+                        } else {
+                            if (pRes.score > target) { winner='player'; detail=`Success! ${pRes.score} vs ${target} (Lower Neg Wins)`; }
+                            else if (target > pRes.score) { winner='system'; detail=`Fail. ${pRes.score} vs ${target} (Lower Neg Wins)`; }
+                            else detail=`Tie. ${pRes.score} vs ${target}`;
+                        }
+                    }
+                    
+                    setTurnResult({ winner, playerScore: pRes.score, systemScore: target, pCards, sCards: [], detail, isNumberCheck: true });
+                    log(`Check: ${pRes.score} vs ${target}. ${detail}`, winner === 'player' ? 'success' : 'danger');
+                    
+                    let deck = [...pCards, ...mainDeck];
+                    let newHand = playerHand.filter(c => !selectedPlayerCardIds.has(c.id));
+                    while(newHand.length < 5 && deck.length > 0) newHand.push(deck.pop());
+                    setMainDeck(uniqueDeck(deck));
+                    setPlayerHand(uniqueDeck(newHand));
+                    setSelectedPlayerCardIds(new Set());
+                    return;
+                }
+
+                if (!encounterActive) return;
+
+                const pCards = playerHand.filter(c => selectedPlayerCardIds.has(c.id));
+                const sCards = manualMode 
+                    ? systemHand.filter(c => selectedSystemCardIds.has(c.id))
+                    : systemHand.slice(0, conditionals.x); 
+
+                const pRes = calculateHandScore(pCards, jackValues);
+                const sRes = calculateHandScore(sCards, {}, true); // Pass true for isSystem
+
+                let pScore = pRes.score;
+                let sScore = sRes.score;
+                
+                // --- Royalty "Full Stop" Logic ---
+                let pFinal = pRes.hasBlackRoyalty ? 0 : pScore;
+                let sFinal = sRes.hasBlackRoyalty ? 0 : sScore;
+                
+                if (pRes.hasRedRoyalty) sFinal = -1; 
+                if (sRes.hasRedRoyalty) pFinal = -1; 
+                
+                // Logs for Royalties
+                if (pRes.hasBlackRoyalty || pRes.hasRedRoyalty) log(`Player uses ${pRes.hasBlackRoyalty ? 'Black' : 'Red'} Royalty!`, 'system');
+                if (sRes.hasBlackRoyalty || sRes.hasRedRoyalty) log(`System uses ${sRes.hasBlackRoyalty ? 'Black' : 'Red'} Royalty!`, 'system');
+
+                let winner = null;
+                let detail = "";
+                
+                const pFail = pFinal === -1;
+                const sFail = sFinal === -1;
+                const pCrit = pFinal === 0;
+                const sCrit = sFinal === 0;
+
+                if (systemPendingCritFail) {
+                    sFinal = -1; 
+                    detail = "System suffered Critical Failure from Duplicate Red Royalty!";
+                    winner = 'player';
+                } else if (pFail && sFail) { winner='draw'; detail="Double Failure!"; }
+                else if (pFail) { winner='system'; detail="Player Critical Failure!"; }
+                else if (sFail) { winner='player'; detail="System Critical Failure!"; }
+                else if (pCrit && sCrit) { winner='draw'; detail="Double Critical Success!"; }
+                else if (pCrit) { winner='player'; detail="Player Critical Success!"; }
+                else if (sCrit) { winner='system'; detail="System Critical Success!"; }
+                else {
+                    if (pFinal >= 0 && sFinal < 0) { winner='player'; detail="Player Positive vs System Negative."; }
+                    else if (sFinal >= 0 && pFinal < 0) { winner='system'; detail="System Positive vs Player Negative."; }
+                    else if (pFinal >= 0 && sFinal >= 0) {
+                        if (pFinal < sFinal) { winner='player'; detail=`Player closer to 0.`; }
+                        else if (sFinal < pFinal) { winner='system'; detail=`System closer to 0.`; }
+                        else { winner='draw'; detail="Tie."; }
+                    } else {
+                        if (pFinal > sFinal) { winner='player'; detail=`Player closer to 0 (Lower Neg).`; }
+                        else if (sFinal > pFinal) { winner='system'; detail=`System closer to 0 (Lower Neg).`; }
+                        else { winner='draw'; detail="Tie."; }
+                    }
+                }
+
+                setTurnResult({ winner, playerScore: pFinal, systemScore: sFinal, pCards, sCards, detail });
+                log(`Result: P(${pFinal}) vs S(${sFinal}). ${detail}`, winner === 'player' ? 'success' : winner === 'system' ? 'danger' : 'neutral');
+                if (systemPendingCritFail) setSystemPendingCritFail(false); 
+
+                const discard = [...pCards, ...sCards];
+                const newGrav = uniqueDeck([...graveyard, ...discard]);
+                
+                let nextPHand = playerHand.filter(c => !selectedPlayerCardIds.has(c.id));
+                let nextSHand = systemHand.filter(c => !sCards.find(sc => sc.id === c.id));
+                
+                let tempDeck = [...mainDeck];
+                let tempGrav = [...newGrav];
+                
+                const drawOne = () => {
+                    if (tempDeck.length === 0) {
+                        if (tempGrav.length === 0) return null;
+                        tempDeck = shuffleDeck([...tempGrav]);
+                        tempGrav = [];
+                    }
+                    return tempDeck.pop();
+                }
+
+                // Fill System First (Check for Red/Black Duplicate)
+                const sysNeeded = 5 - nextSHand.length;
+                for(let i=0; i<sysNeeded; i++) {
+                    const c = drawOne();
+                    if(c) {
+                        // Check RED Duplicate (Failure State)
+                        if (c.type === 'Royalty' && c.color === 'red') {
+                            if (nextSHand.some(h => h.type === 'Royalty' && h.color === 'red')) {
+                                log("System drew duplicate Red Royalty! Pending Failure.", 'danger');
+                                setSystemPendingCritFail(true);
+                            }
+                        }
+                        
+                        // Check BLACK Duplicate (Auto-Discard)
+                        if (c.type === 'Royalty' && c.color === 'black') {
+                            if (nextSHand.some(h => h.type === 'Royalty' && h.color === 'black')) {
+                                // Discard this one and redraw immediately for this slot
+                                tempGrav.push(c);
+                                i--; // decrement to retry
+                                continue;
+                            }
+                        }
+                        
+                        nextSHand.push(c);
+                    }
+                }
+
+                const playNeeded = 5 - nextPHand.length;
+                const drawnForPlayer = [];
+                let playerConflict = null; 
+                let playerInstantFail = false;
+
+                for(let i=0; i<playNeeded; i++) {
+                    const c = drawOne();
+                    if (c) {
+                        if (c.type === 'Royalty' && c.color === 'red') {
+                             if (nextPHand.some(h => h.type === 'Royalty' && h.color === 'red') || drawnForPlayer.some(h => h.type === 'Royalty' && h.color === 'red')) {
+                                 playerInstantFail = true;
+                             }
+                        }
+                        if (c.type === 'Royalty' && c.color === 'black') {
+                             const existing = nextPHand.find(h => h.type === 'Royalty' && h.color === 'black') || drawnForPlayer.find(h => h.type === 'Royalty' && h.color === 'black');
+                             if (existing) {
+                                 playerConflict = { newCard: c, oldCard: existing };
+                             }
+                        }
+                        drawnForPlayer.push(c);
+                    }
+                }
+
+                if (playerInstantFail) {
+                    log("You drew a duplicate Red Royalty! INSTANT DEFEAT.", 'danger');
+                    setTurnResult({ winner: 'system', detail: "Instant Defeat: Duplicate Red Royalty", playerScore: -1, systemScore: 0, pCards:[], sCards:[] });
+                    setEncounterActive(false); 
+                }
+
+                setGraveyard(uniqueDeck(tempGrav));
+                setMainDeck(uniqueDeck(tempDeck));
+                setSystemHand(uniqueDeck(nextSHand));
+                setSelectedPlayerCardIds(new Set());
+                setSelectedSystemCardIds(new Set());
+                
+                if (playerConflict) {
+                    setPlayerHand(uniqueDeck([...nextPHand, ...drawnForPlayer]));
+                    setModal({
+                        type: 'ROYALTY_CONFLICT',
+                        newCard: playerConflict.newCard,
+                        oldCard: playerConflict.oldCard
+                    });
+                } else {
+                    setPlayerHand(uniqueDeck([...nextPHand, ...drawnForPlayer]));
+                }
+            };
+
+            const resolveRoyaltyConflict = (keepNew) => {
+                if (!modal || modal.type !== 'ROYALTY_CONFLICT') return;
+                const { newCard, oldCard } = modal;
+                const discard = keepNew ? oldCard : newCard;
+                
+                let newHand = playerHand.filter(c => c.id !== discard.id);
+                let grav = uniqueDeck([...graveyard, discard]);
+                let deck = [...mainDeck];
+                
+                const res = drawFromDeck(deck, grav, 1);
+                newHand = [...newHand, ...res.drawn];
+
+                setPlayerHand(uniqueDeck(newHand));
+                setGraveyard(res.graveyard);
+                setMainDeck(res.deck);
+
+                log(`Resolved Royalty Conflict. Discarded ${discard.label}${discard.suit} and drew replacement.`, 'system');
+                setModal(null);
+            };
+
+            // Visibility Logic
+            const showPlayerHand = encounterActive || manualMode;
+            
+            // Smart Numpad Transitions
+            let numpadClass = "";
+            if (!manualMode) {
+                numpadClass = "-translate-y-24 opacity-0 pointer-events-none"; // Hidden Up
+            } else if (encounterActive) {
+                numpadClass = "-translate-x-[120%] opacity-0 pointer-events-none"; // Hidden Left (swapped out)
+            } else {
+                numpadClass = "translate-x-0 translate-y-0 opacity-100 z-10"; // Visible Center
+            }
+
+            // Smart System Hand Transitions
+            let sysHandClass = "";
+            if (encounterActive) {
+                sysHandClass = "translate-x-0 translate-y-0 opacity-100 z-10"; // Visible Center
+            } else if (manualMode) {
+                sysHandClass = "translate-x-[120%] opacity-0 pointer-events-none"; // Hidden Right (waiting to swap in)
+            } else {
+                sysHandClass = "-translate-y-24 opacity-0 pointer-events-none"; // Hidden Up
+            }
+
+            return (
+                <div className="min-h-screen wood-texture flex flex-col items-center justify-center p-4 font-sans text-slate-100">
+                    <style>{styles}</style>
+
+                    {/* --- MODALS --- */}
+                    {modal?.type === 'JACK' && (
+                        <Modal>
+                            <h3 className="text-xl font-bold mb-4 text-center">Set Jack Value</h3>
+                            <div className="flex items-center justify-center gap-4 mb-6">
+                                <button onClick={() => setModal(p => ({...p, currentValue: modal.isRed ? Math.max(-5, p.currentValue - 1) : Math.max(1, p.currentValue - 1) }))} className="bg-slate-700 w-10 h-10 rounded font-bold text-xl">-</button>
+                                <span className="text-4xl font-mono">{modal.currentValue}</span>
+                                <button onClick={() => setModal(p => ({...p, currentValue: modal.isRed ? Math.min(-1, p.currentValue + 1) : Math.min(5, p.currentValue + 1) }))} className="bg-slate-700 w-10 h-10 rounded font-bold text-xl">+</button>
+                            </div>
+                            <button onClick={() => confirmJackValue(modal.cardId, modal.currentValue)} className="w-full bg-green-600 py-2 rounded font-bold">Confirm</button>
+                        </Modal>
+                    )}
+                    
+                    {modal?.type === 'JACK_AUTO' && (
+                        <Modal>
+                            <h3 className="text-xl font-bold mb-4 text-center text-yellow-400">Jack Auto-Selected!</h3>
+                            <p className="mb-4 text-center text-sm text-slate-300">This Jack was selected by the Auto (Y) limit. Please set its value.</p>
+                            <div className="flex items-center justify-center gap-4 mb-6">
+                                <button onClick={() => setModal(p => ({...p, currentValue: modal.isRed ? Math.max(-5, p.currentValue - 1) : Math.max(1, p.currentValue - 1) }))} className="bg-slate-700 w-10 h-10 rounded font-bold text-xl">-</button>
+                                <span className="text-4xl font-mono">{modal.currentValue}</span>
+                                <button onClick={() => setModal(p => ({...p, currentValue: modal.isRed ? Math.min(-1, p.currentValue + 1) : Math.min(5, p.currentValue + 1) }))} className="bg-slate-700 w-10 h-10 rounded font-bold text-xl">+</button>
+                            </div>
+                            <button onClick={() => confirmJackValue(modal.card.id, modal.currentValue)} className="w-full bg-green-600 py-2 rounded font-bold">Confirm & Continue</button>
+                        </Modal>
+                    )}
+
+                    {modal?.type === 'ACE_AUTO' && (
+                        <Modal>
+                            <h3 className="text-xl font-bold mb-4 text-center text-yellow-400">Ace Auto-Selected!</h3>
+                            <p className="mb-6 text-center text-sm text-slate-300">
+                                This Ace was selected by the Auto (Y) limit. 
+                                <br/><span className="font-bold text-white">{modal.card.color === 'black' ? "Play Black Ace to refresh YOUR hand?" : "Play Red Ace to refresh SYSTEM hand?"}</span>
+                            </p>
+                            <button onClick={() => handleAceEffect(modal.card)} className="w-full bg-green-600 py-3 rounded font-bold text-lg mb-2">Confirm Play</button>
+                        </Modal>
+                    )}
+
+                    {modal?.type === 'ACE_MANUAL' && (
+                         <Modal>
+                            <h3 className="text-xl font-bold mb-4 text-center text-white">Play Ace Manually?</h3>
+                            <div className="flex flex-col items-center gap-4">
+                                <div className="text-4xl">{modal.card.color === 'black' ? '♠/♣' : '♥/♦'}</div>
+                                <p className="text-center text-sm text-slate-300 mb-2">
+                                    {modal.card.color === 'black' 
+                                        ? "This will discard your ENTIRE hand and draw 5 new cards." 
+                                        : "This will discard this card, redraw 1, then discard and redraw the SYSTEM'S hand."}
+                                </p>
+                                <div className="flex gap-4 w-full">
+                                    <button onClick={() => setModal(null)} className="flex-1 bg-slate-600 py-2 rounded font-bold hover:bg-slate-500">Cancel</button>
+                                    <button onClick={() => handleAceEffect(modal.card)} className="flex-1 bg-green-600 py-2 rounded font-bold hover:bg-green-500">Confirm</button>
+                                </div>
+                            </div>
+                        </Modal>
+                    )}
+
+                    {modal?.type === 'ROYALTY_CONFLICT' && (
+                        <Modal>
+                            <h3 className="text-xl font-bold mb-4 text-center text-red-400">Royalty Conflict!</h3>
+                            <p className="mb-6 text-center text-sm text-slate-300">You can only hold one Black Royalty. Choose which to keep:</p>
+                            <div className="flex gap-4">
+                                <button onClick={() => resolveRoyaltyConflict(false)} className="flex-1 bg-slate-700 p-4 rounded border hover:bg-slate-600">
+                                    <div className="text-xs uppercase text-slate-400">Keep Old</div>
+                                    <div className="text-xl font-bold">{modal.oldCard.label} {modal.oldCard.suit}</div>
+                                </button>
+                                <button onClick={() => resolveRoyaltyConflict(true)} className="flex-1 bg-slate-700 p-4 rounded border hover:bg-slate-600">
+                                    <div className="text-xs uppercase text-slate-400">Keep New</div>
+                                    <div className="text-xl font-bold">{modal.newCard.label} {modal.newCard.suit}</div>
+                                </button>
+                            </div>
+                        </Modal>
+                    )}
+
+                    {/* UI */}
+                    <div className="absolute top-4 left-4 bg-slate-900/90 border border-slate-600 p-4 rounded-lg shadow-xl z-20">
+                        <h3 className="text-white font-bold text-sm uppercase tracking-wider mb-3 border-b border-slate-700 pb-2">Conditionals</h3>
+                        <div className="flex flex-col gap-3 text-sm">
+                            <div className="flex justify-between items-center gap-4">
+                                <span>Total Selected Cards:</span>
+                                <div className="flex items-center gap-2">
+                                    <button onClick={() => setConditionals(p => ({...p, x: Math.max(1, p.x-1), y: Math.min(p.y, Math.max(1, p.x-1))}))} className="bg-slate-700 px-2 rounded">-</button>
+                                    <span className="w-4 text-center">{conditionals.x}</span>
+                                    <button onClick={() => setConditionals(p => ({...p, x: Math.min(5, p.x+1)}))} className="bg-slate-700 px-2 rounded">+</button>
+                                </div>
+                            </div>
+                            <div className="flex justify-between items-center gap-4">
+                                <span>Total Auto-Locked Cards:</span>
+                                <div className="flex items-center gap-2">
+                                    <button onClick={() => setConditionals(p => ({...p, y: Math.max(0, p.y-1)}))} className="bg-slate-700 px-2 rounded">-</button>
+                                    <span className="w-4 text-center">{conditionals.y}</span>
+                                    <button onClick={() => setConditionals(p => ({...p, y: Math.min(p.x, p.y+1)}))} className="bg-slate-700 px-2 rounded">+</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="absolute bottom-4 right-4 z-30 flex flex-col items-end">
+                        {isSaveMenuOpen && (
+                            <div className="mb-2 bg-slate-900/95 border border-slate-600 rounded-lg p-2 shadow-2xl w-64 animate-in slide-in-from-bottom-2 fade-in">
+                                {[1,2,3].map(id => (
+                                    <div key={id} className={`flex justify-between p-2 rounded ${activeProfile===id?'bg-slate-700 ring-1 ring-blue-500':'bg-slate-800/50'}`}>
+                                        <button onClick={() => setActiveProfile(id)} className="text-left font-bold w-full">Profile {id}</button>
+                                        <button onClick={(e) => { e.stopPropagation(); if(confirm('Delete?')) localStorage.removeItem(`card_game_save_${id}`); }} className="text-red-400 ml-2">🗑️</button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        <button onClick={() => setIsSaveMenuOpen(!isSaveMenuOpen)} className="bg-blue-600 px-4 py-2 rounded-lg font-bold">Profile {activeProfile}</button>
+                    </div>
+
+                    <div className="w-full max-w-6xl flex flex-col gap-4 relative">
+                        {/* System */}
+                        <div className="w-full flex justify-center mb-4 min-h-[300px] relative overflow-hidden">
+                             {/* Numpad Container */}
+                             <div className={`absolute top-4 w-full flex justify-center transition-all duration-700 ease-in-out transform ${numpadClass}`}>
+                                <Numpad value={manualTargetValue} setValue={setManualTargetValue} />
+                             </div>
+
+                             {/* System Hand Container */}
+                             <div className={`absolute bottom-4 w-full flex justify-center transition-all duration-700 ease-in-out transform ${sysHandClass}`}>
+                                <div className="flex gap-4 p-4 bg-black/20 rounded-xl backdrop-blur-sm border border-white/10">
+                                    {systemHand.map((card, idx) => (
+                                        <Card key={card.id} card={card} isFaceUp={encounterActive && manualMode} isSelected={selectedSystemCardIds.has(card.id)} onClick={() => handleCardSelect(card, false)} canSelect={manualMode && encounterActive} />
+                                    ))}
+                                    {systemHand.length === 0 && <div className="text-white/50 italic">System Hand Empty</div>}
+                                </div>
+                             </div>
+                        </div>
+
+                        {/* Middle */}
+                        <div className="flex flex-col md:flex-row gap-6 justify-between items-stretch h-96 z-10">
+                            <div className="w-full md:w-1/4 flex justify-center items-center bg-black/30 rounded-xl border border-white/5 felt-texture"><DeckPile label="Graveyard" count={graveyard.length} /></div>
+                            <div className="w-full md:w-2/4 flex flex-col gap-4">
+                                <div className="flex-1 bg-slate-900/90 rounded-xl border border-yellow-500/30 p-4 flex flex-col items-center justify-center shadow-2xl">
+                                    {turnResult ? (
+                                        <div className="text-center animate-in zoom-in w-full">
+                                            <h2 className={`text-3xl font-bold mb-4 ${turnResult.winner==='player'?'text-green-400':turnResult.winner==='system'?'text-red-400':'text-yellow-400'}`}>{turnResult.winner==='player'?'VICTORY':turnResult.winner==='system'?'DEFEAT':'DRAW'}</h2>
+                                            
+                                            <div className="flex justify-between items-center px-4 w-full">
+                                                {/* Player Side */}
+                                                <div className="flex flex-col items-center gap-2">
+                                                    <div className="text-xs uppercase tracking-widest text-slate-400">Player</div>
+                                                    <div className="text-4xl font-bold font-mono">{turnResult.playerScore}</div>
+                                                    <div className="flex gap-1 mt-1">
+                                                        {turnResult.pCards.map(c => <Card key={`p-${c.id}`} card={c} isSmall isFaceUp />)}
+                                                    </div>
+                                                </div>
+
+                                                <div className="text-xl font-bold text-slate-600">VS</div>
+
+                                                {/* System Side */}
+                                                <div className="flex flex-col items-center gap-2">
+                                                    <div className="text-xs uppercase tracking-widest text-slate-400">{turnResult.isNumberCheck ? 'Target' : 'System'}</div>
+                                                    <div className="text-4xl font-bold font-mono">{turnResult.systemScore}</div>
+                                                    {!turnResult.isNumberCheck && (
+                                                        <div className="flex gap-1 mt-1">
+                                                            {turnResult.sCards.map(c => <Card key={`s-${c.id}`} card={c} isSmall isFaceUp />)}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            <p className="text-sm text-yellow-100/80 mt-4">{turnResult.detail}</p>
+                                        </div>
+                                    ) : (
+                                        <div className="text-center text-white/40"><div className="text-6xl mb-2 opacity-20">♠</div><p>{encounterActive ? "Select & End Turn" : manualMode ? "Check Mode" : "Start Encounter"}</p></div>
+                                    )}
+                                </div>
+                                <div className="h-16 flex gap-2">
+                                    <button onClick={() => setManualMode(!manualMode)} className="w-24 bg-purple-700 rounded-lg font-bold text-xs">{manualMode?'MANUAL ON':'MANUAL OFF'}</button>
+                                    <button onClick={toggleEncounter} className={`flex-1 font-bold rounded-lg ${encounterActive?'bg-red-600':'bg-green-600'}`}>{encounterActive?'STOP':'START'}</button>
+                                    <button onClick={endTurn} className="flex-1 bg-yellow-600 font-bold rounded-lg">END TURN</button>
+                                </div>
+                                <div className="h-32 bg-black/60 rounded-xl p-3 overflow-y-auto font-mono text-xs scrollbar-hide border border-white/10">
+                                    {logs.map(log => <div key={log.id} className={log.type==='danger'?'text-red-400':log.type==='success'?'text-green-400':'text-gray-300'}>{log.text}</div>)}
+                                    <div ref={logEndRef} />
+                                </div>
+                            </div>
+                            <div className="w-full md:w-1/4 flex justify-center items-center bg-black/30 rounded-xl border border-white/5 felt-texture"><DeckPile label="Draw Deck" count={mainDeck.length} showShuffle onClick={() => { setMainDeck(shuffleDeck([...mainDeck])); log("Shuffled."); }} /></div>
+                        </div>
+
+                        {/* Player Hand */}
+                        <div className="w-full flex justify-center mt-4 min-h-[160px] relative overflow-hidden">
+                            <div className={`w-full flex justify-center transition-all duration-700 ease-in-out transform ${showPlayerHand ? 'translate-y-0 opacity-100' : 'translate-y-24 opacity-0 pointer-events-none'}`}>
+                                <div className="flex gap-4 p-4 rounded-xl backdrop-blur-sm bg-black/40 border-transparent">
+                                    {playerHand.map((card, idx) => (
+                                        <Card 
+                                            key={card.id} card={card} 
+                                            isSelected={selectedPlayerCardIds.has(card.id)} 
+                                            isLocked={idx < conditionals.y} 
+                                            onClick={() => handleCardSelect(card, true)} 
+                                            customValue={jackValues[card.id]}
+                                        />
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
