@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gambit System Backend</title>
+    <title>Zero Sum Card Game</title>
     
     <!-- React & ReactDOM -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
@@ -22,7 +22,7 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect, useRef } = React;
+        const { useState, useEffect, useRef, useCallback } = React;
 
         // --- Constants & Helpers ---
 
@@ -77,7 +77,6 @@
             return newDeck;
         };
 
-        // Helper to prevent duplicates in piles
         const uniqueDeck = (cards) => {
             const seen = new Set();
             return cards.filter(c => {
@@ -98,7 +97,7 @@
                     if (card.color === 'red') hasRedRoyalty = true;
                 } else if (card.type === 'Jack') {
                     if (isSystem) {
-                        // System Optimal Strategy: Black=5 (Max Pos), Red=-1 (Max Neg / Closest to 0)
+                        // System Optimal Strategy
                         score += (card.color === 'black' ? 5 : -1);
                     } else {
                         const val = jackValues[card.id] !== undefined ? jackValues[card.id] : card.pointValue;
@@ -232,8 +231,9 @@
             const [playerHand, setPlayerHand] = useState([]);
             const [systemHand, setSystemHand] = useState([]);
             
-            const [selectedPlayerCardIds, setSelectedPlayerCardIds] = useState(new Set());
-            const [selectedSystemCardIds, setSelectedSystemCardIds] = useState(new Set()); 
+            // Replaced single sets with distinct manual sets. Auto selection is now derived.
+            const [manualPlayerIds, setManualPlayerIds] = useState(new Set());
+            const [manualSystemIds, setManualSystemIds] = useState(new Set());
             
             const [jackValues, setJackValues] = useState({}); 
 
@@ -247,8 +247,24 @@
             
             const [modal, setModal] = useState(null); 
             const [systemPendingCritFail, setSystemPendingCritFail] = useState(false);
+            const [pendingPlayerDraw, setPendingPlayerDraw] = useState(false);
             
             const logEndRef = useRef(null);
+
+            // --- Helpers for Selection Merging ---
+            const getAutoSelectedIds = (hand, count) => {
+                const s = new Set();
+                const limit = Math.min(count, hand.length);
+                for (let i = 0; i < limit; i++) s.add(hand[i].id);
+                return s;
+            };
+
+            const getEffectiveSelectedIds = (hand, manualSet, autoCount) => {
+                const combined = new Set(manualSet);
+                const limit = Math.min(autoCount, hand.length);
+                for (let i = 0; i < limit; i++) combined.add(hand[i].id);
+                return combined;
+            };
 
             // --- Initialization & Saving ---
             useEffect(() => {
@@ -270,10 +286,15 @@
                         setManualTargetValue(data.manualTargetValue || '0');
                         setJackValues(data.jackValues || {});
                         setSystemPendingCritFail(data.systemPendingCritFail || false);
-                        setSelectedPlayerCardIds(new Set());
-                        setSelectedSystemCardIds(new Set());
+                        
+                        // We reset manual selections on load for simplicity or could persist them. 
+                        // For this refactor, let's clear them to ensure consistency with derived logic.
+                        setManualPlayerIds(new Set());
+                        setManualSystemIds(new Set());
+                        
                         setTurnResult(null);
                         setLogs(prev => [...(data.logs || []), { id: Date.now() + Math.random(), text: `Profile ${activeProfile} Loaded.`, type: 'system' }]);
+                        setPendingPlayerDraw(false);
                     } catch (e) { resetGame(false); }
                 } else { resetGame(false); }
                 setIsLoaded(true);
@@ -311,78 +332,42 @@
 
             }, [systemHand, encounterActive, manualMode]);
 
-            // --- Auto Actions (Player - Y Lock Detection) ---
+            // --- Auto Actions (Y Lock Modal Triggers) ---
             useEffect(() => {
-                if (!isLoaded || playerHand.length === 0) return;
-                
-                // 1. Identify Auto-Selected Cards
-                const autoSelectedIds = new Set();
-                const limit = Math.min(conditionals.y, playerHand.length);
-                
-                // Check if any specific card needs a prompt
-                for(let i=0; i<limit; i++) {
-                    const c = playerHand[i];
-                    autoSelectedIds.add(c.id);
+                if (!isLoaded) return;
+                if (!encounterActive && !manualMode) return; 
 
-                    // Check for Auto-Ace
+                // Priority 1: System Auto-Selection (If Manual Mode active)
+                if (manualMode) {
+                    const sysLimit = Math.min(conditionals.y, systemHand.length);
+                    for (let i = 0; i < sysLimit; i++) {
+                        const c = systemHand[i];
+                        if (c.type === 'Ace' && !modal) {
+                            setModal({ type: 'ACE_AUTO', card: c, isSystem: true });
+                            return;
+                        }
+                        if (c.type === 'Jack' && jackValues[c.id] === undefined && !modal) {
+                            setModal({ type: 'JACK_AUTO', card: c, isRed: c.color === 'red', currentValue: c.color === 'red' ? -1 : 1, isSystem: true });
+                            return;
+                        }
+                    }
+                }
+
+                // Priority 2: Player Auto-Selection
+                const pLimit = Math.min(conditionals.y, playerHand.length);
+                
+                for(let i=0; i<pLimit; i++) {
+                    const c = playerHand[i];
                     if (c.type === 'Ace' && !modal) {
-                         setModal({
-                            type: 'ACE_AUTO',
-                            card: c
-                         });
-                         return; // Wait for user interaction
+                         setModal({ type: 'ACE_AUTO', card: c, isSystem: false });
+                         return; 
                     }
 
-                    // Check for Auto-Jack
                     if (c.type === 'Jack' && jackValues[c.id] === undefined && !modal) {
-                         setModal({
-                            type: 'JACK_AUTO',
-                            card: c,
-                            isRed: c.color === 'red',
-                            currentValue: c.color === 'red' ? -1 : 1
-                         });
+                         setModal({ type: 'JACK_AUTO', card: c, isRed: c.color === 'red', currentValue: c.color === 'red' ? -1 : 1, isSystem: false });
                          return;
                     }
                 }
-                
-                // 2. Sync Selection State
-                setSelectedPlayerCardIds(prev => {
-                    const next = new Set(autoSelectedIds);
-                    // Fill remaining spots with manual selections if valid
-                    let needed = conditionals.x - limit;
-                    for (let id of prev) {
-                        if (needed <= 0) break;
-                        if (!autoSelectedIds.has(id)) {
-                            next.add(id);
-                            needed--;
-                        }
-                    }
-                    return next;
-                });
-
-                // System Manual Mode Sync
-                if (manualMode && encounterActive) {
-                    const sysLimit = Math.min(conditionals.y, systemHand.length);
-                    const sysAutoIds = new Set();
-                    for(let i=0; i<sysLimit; i++) {
-                        sysAutoIds.add(systemHand[i].id);
-                    }
-                    setSelectedSystemCardIds(prev => {
-                        const next = new Set(sysAutoIds);
-                        let needed = conditionals.x - sysLimit;
-                        for (let id of prev) {
-                            if (needed <= 0) break;
-                            if (!sysAutoIds.has(id)) {
-                                next.add(id);
-                                needed--;
-                            }
-                        }
-                        return next;
-                    });
-                } else {
-                    setSelectedSystemCardIds(new Set());
-                }
-
             }, [playerHand, systemHand, conditionals, manualMode, encounterActive, isLoaded, jackValues, modal]); 
 
 
@@ -400,12 +385,13 @@
                 setPlayerHand(pHand);
                 setSystemHand(sHand);
                 setGraveyard([]);
-                setSelectedPlayerCardIds(new Set());
-                setSelectedSystemCardIds(new Set());
+                setManualPlayerIds(new Set());
+                setManualSystemIds(new Set());
                 setJackValues({});
                 setTurnResult(null);
                 setSystemPendingCritFail(false);
                 setModal(null);
+                setPendingPlayerDraw(false);
                 
                 if (isStopEncounter) {
                     setEncounterActive(false);
@@ -425,9 +411,86 @@
                 }
             };
 
+            const changeConditionals = (type, delta) => {
+                setConditionals(prev => {
+                    const next = { ...prev };
+                    if (type === 'x') {
+                        next.x = Math.max(1, Math.min(5, prev.x + delta));
+                        // Ensure Y is not > X
+                        if (next.y > next.x) next.y = next.x;
+                    } else if (type === 'y') {
+                        const potentialY = prev.y + delta;
+                        
+                        // Check if increasing Y violates total limit (X) given current manual selections
+                        if (delta > 0) {
+                            if (potentialY > prev.x) return prev; // Can't exceed X
+                            
+                            // Check Player Limit
+                            // If we increase Y, we add 1 mandatory selection.
+                            // If that overlap with existing manual, it effectively converts manual->auto (count stays same).
+                            // If it DOESN'T overlap, count increases.
+                            
+                            // To be safe and explicit as requested: "prompt if too many selected cards".
+                            // Simple check: If (newY + validManualCount) > X -> Block.
+                            // Valid manual count excludes cards that will become auto.
+                            
+                            // Filter current manual sets to exclude cards that WOULD become auto
+                            const pManualRemaining = new Set([...manualPlayerIds].filter(id => {
+                                const idx = playerHand.findIndex(c => c.id === id);
+                                return idx >= potentialY;
+                            }));
+                            
+                            if (potentialY + pManualRemaining.size > prev.x) {
+                                setModal({ type: 'LIMIT_REACHED', isSystem: false });
+                                return prev;
+                            }
+                            
+                            if (manualMode) {
+                                const sManualRemaining = new Set([...manualSystemIds].filter(id => {
+                                    const idx = systemHand.findIndex(c => c.id === id);
+                                    return idx >= potentialY;
+                                }));
+                                if (potentialY + sManualRemaining.size > prev.x) {
+                                    setModal({ type: 'LIMIT_REACHED', isSystem: true });
+                                    return prev;
+                                }
+                            }
+                            
+                            // If allowed, we also need to cleanup the manual sets so we don't have duplicates
+                            // This is done in the state update below, but here we just return the new value to update Y
+                        }
+                        
+                        next.y = Math.max(0, Math.min(prev.x, potentialY));
+                        
+                        // Clean up manual sets if Y increases (swallowing manual cards)
+                        if (next.y > prev.y) {
+                             setManualPlayerIds(curr => {
+                                 const n = new Set();
+                                 curr.forEach(id => {
+                                     const idx = playerHand.findIndex(c => c.id === id);
+                                     if (idx >= next.y) n.add(id);
+                                 });
+                                 return n;
+                             });
+                             if (manualMode) {
+                                 setManualSystemIds(curr => {
+                                     const n = new Set();
+                                     curr.forEach(id => {
+                                         const idx = systemHand.findIndex(c => c.id === id);
+                                         if (idx >= next.y) n.add(id);
+                                     });
+                                     return n;
+                                 });
+                             }
+                        }
+                    }
+                    return next;
+                });
+            };
+
             const drawFromDeck = (deck, grave, count) => {
                 let d = [...deck];
-                let g = uniqueDeck([...grave]); // Ensure unique
+                let g = uniqueDeck([...grave]);
                 let drawn = [];
                 for(let i=0; i<count; i++) {
                     if (d.length === 0) {
@@ -446,38 +509,25 @@
                 let currentGraveyard = [...graveyard];
 
                 const cardsToDiscard = [...currentHand];
-                // Deduplicate graveyard push
                 currentGraveyard = uniqueDeck([...currentGraveyard, ...cardsToDiscard]);
 
                 const res = drawFromDeck(currentDeck, currentGraveyard, 5);
-                
                 let newHand = res.drawn;
 
-                // --- SYSTEM DUPLICATE CHECK (Black Royalty) during Refill ---
-                if (target === 'system') {
-                    // Check if new hand has > 1 Black Royalty
+                if (target === 'system' && !manualMode) {
+                     // Auto Logic for System only
                     let blackRoyaltyCount = newHand.filter(c => c.type === 'Royalty' && c.color === 'black').length;
-                    
-                    // While loop to resolve duplicates immediately
                     let tempDeck = res.deck;
                     let tempGrav = res.graveyard;
-                    
                     while (blackRoyaltyCount > 1) {
-                         // Find index of last black royalty
-                         const idx = newHand.findIndex(c => c.type === 'Royalty' && c.color === 'black');
-                         // Discard it
-                         const discarded = newHand.splice(idx, 1)[0];
-                         tempGrav.push(discarded);
-                         
-                         // Draw replacement
-                         const drawRes = drawFromDeck(tempDeck, tempGrav, 1);
-                         tempDeck = drawRes.deck;
-                         tempGrav = drawRes.graveyard;
-                         if (drawRes.drawn.length > 0) {
-                             newHand.push(drawRes.drawn[0]);
-                         }
-                         // Re-check count
-                         blackRoyaltyCount = newHand.filter(c => c.type === 'Royalty' && c.color === 'black').length;
+                            const idx = newHand.findIndex(c => c.type === 'Royalty' && c.color === 'black');
+                            const discarded = newHand.splice(idx, 1)[0];
+                            tempGrav.push(discarded);
+                            const drawRes = drawFromDeck(tempDeck, tempGrav, 1);
+                            tempDeck = drawRes.deck;
+                            tempGrav = drawRes.graveyard;
+                            if (drawRes.drawn.length > 0) newHand.push(drawRes.drawn[0]);
+                            blackRoyaltyCount = newHand.filter(c => c.type === 'Royalty' && c.color === 'black').length;
                     }
                     setMainDeck(tempDeck);
                     setGraveyard(tempGrav);
@@ -488,82 +538,108 @@
 
                 if (target === 'player') {
                     setPlayerHand(newHand);
-                    setSelectedPlayerCardIds(new Set()); 
+                    setManualPlayerIds(new Set()); 
                 } else {
                     setSystemHand(newHand);
-                    setSelectedSystemCardIds(new Set());
+                    setManualSystemIds(new Set());
                 }
             };
 
-            const handleAceEffect = (card) => {
+            const handleAceEffect = (card, source = 'player') => {
                 setModal(null); 
+                const isBlack = card.color === 'black';
                 
-                if (card.color === 'black') {
-                    log("Black Ace Played. Your Hand Discarded & Redrawn.", 'success');
-                    recycleAndRefillHand('player', 'self'); 
-                } else {
-                    log("Red Ace Played. System Hand Discarded & Redrawn.", 'success');
-                    
-                    let newPHand = playerHand.filter(c => c.id !== card.id);
-                    let grav = uniqueDeck([...graveyard, card]);
-                    let deck = [...mainDeck];
-
-                    const res1 = drawFromDeck(deck, grav, 1);
-                    newPHand = uniqueDeck([...newPHand, ...res1.drawn]);
-                    grav = res1.graveyard;
-                    deck = res1.deck;
-
-                    const sysDiscard = [...systemHand];
-                    grav = uniqueDeck([...grav, ...sysDiscard]);
-                    const res2 = drawFromDeck(deck, grav, 5);
-                    
-                    // Note: recycleAndRefillHand handles system logic better, but here we manually did it.
-                    // Let's add the System Black Royalty Check manually here for safety.
-                    let sysHand = res2.drawn;
-                    let blackRoyaltyCount = sysHand.filter(c => c.type === 'Royalty' && c.color === 'black').length;
-                    let tDeck = res2.deck;
-                    let tGrav = res2.graveyard;
-
-                    while (blackRoyaltyCount > 1) {
-                         const idx = sysHand.findIndex(c => c.type === 'Royalty' && c.color === 'black');
-                         const discarded = sysHand.splice(idx, 1)[0];
-                         tGrav.push(discarded);
-                         const dRes = drawFromDeck(tDeck, tGrav, 1);
-                         tDeck = dRes.deck;
-                         tGrav = dRes.graveyard;
-                         if (dRes.drawn.length > 0) sysHand.push(dRes.drawn[0]);
-                         blackRoyaltyCount = sysHand.filter(c => c.type === 'Royalty' && c.color === 'black').length;
+                if (isBlack) {
+                    if (source === 'player') {
+                         log("Player Black Ace: Player Hand Discarded & Redrawn.", 'success');
+                         recycleAndRefillHand('player', 'self');
+                    } else {
+                         log("System Black Ace: System Hand Discarded & Redrawn.", 'danger');
+                         recycleAndRefillHand('system', 'self');
                     }
+                } else {
+                     if (source === 'player') {
+                         log("Player Red Ace: System Hand Discarded & Redrawn.", 'success');
+                         let newHand = playerHand.filter(c => c.id !== card.id);
+                         let grav = uniqueDeck([...graveyard, card]);
+                         let deck = [...mainDeck];
+                         const res1 = drawFromDeck(deck, grav, 1);
+                         newHand = uniqueDeck([...newHand, ...res1.drawn]);
+                         
+                         let sysDiscard = [...systemHand];
+                         grav = uniqueDeck([...res1.graveyard, ...sysDiscard]);
+                         const res2 = drawFromDeck(res1.deck, grav, 5);
+                         
+                         let sHand = res2.drawn;
+                         let tDeck = res2.deck;
+                         let tGrav = res2.graveyard;
+                         
+                         if (!manualMode) {
+                              let blackRoyaltyCount = sHand.filter(c => c.type === 'Royalty' && c.color === 'black').length;
+                                while (blackRoyaltyCount > 1) {
+                                     const idx = sHand.findIndex(c => c.type === 'Royalty' && c.color === 'black');
+                                     const discarded = sHand.splice(idx, 1)[0];
+                                     tGrav.push(discarded);
+                                     const dRes = drawFromDeck(tDeck, tGrav, 1);
+                                     tDeck = dRes.deck;
+                                     tGrav = dRes.graveyard;
+                                     if (dRes.drawn.length > 0) sHand.push(dRes.drawn[0]);
+                                     blackRoyaltyCount = sHand.filter(c => c.type === 'Royalty' && c.color === 'black').length;
+                                }
+                         }
 
-                    setPlayerHand(newPHand);
-                    setSystemHand(sysHand);
-                    setGraveyard(tGrav);
-                    setMainDeck(tDeck);
-                    setSelectedPlayerCardIds(new Set());
+                         setPlayerHand(newHand);
+                         setSystemHand(sHand);
+                         setGraveyard(tGrav);
+                         setMainDeck(tDeck);
+                         setManualPlayerIds(new Set());
+
+                     } else {
+                         log("System Red Ace: Player Hand Discarded & Redrawn.", 'danger');
+                         let newSysHand = systemHand.filter(c => c.id !== card.id);
+                         let grav = uniqueDeck([...graveyard, card]);
+                         let deck = [...mainDeck];
+                         
+                         const res1 = drawFromDeck(deck, grav, 1);
+                         newSysHand = uniqueDeck([...newSysHand, ...res1.drawn]);
+                         
+                         let playerDiscard = [...playerHand];
+                         grav = uniqueDeck([...res1.graveyard, ...playerDiscard]);
+                         
+                         const res2 = drawFromDeck(res1.deck, grav, 5);
+                         
+                         setSystemHand(newSysHand);
+                         setPlayerHand(res2.drawn);
+                         setGraveyard(res2.graveyard);
+                         setMainDeck(res2.deck);
+                         setManualSystemIds(new Set());
+                         setManualPlayerIds(new Set());
+                     }
                 }
             };
 
             const handleCardSelect = (card, isPlayer) => {
-                const canAct = encounterActive || (manualMode && !encounterActive && isPlayer);
+                const canAct = encounterActive || (manualMode && !encounterActive);
                 if (!canAct) return;
+                if (!isPlayer && !manualMode) return; 
 
-                // Priority 1: Ace Check (Manual Modal)
-                if (isPlayer && card.type === 'Ace') {
-                    setModal({ type: 'ACE_MANUAL', card });
+                // Priority 1: Ace Check
+                if (card.type === 'Ace') {
+                    setModal({ type: 'ACE_MANUAL', card, isSystem: !isPlayer });
                     return; 
                 }
 
-                // Priority 2: Locked check for normal cards
+                // Priority 2: Locked check
                 const hand = isPlayer ? playerHand : systemHand;
                 const index = hand.findIndex(c => c.id === card.id);
-                if (index < conditionals.y) return; 
+                if (index < conditionals.y) return; // Locked by auto-selection
 
-                const currentSet = isPlayer ? selectedPlayerCardIds : selectedSystemCardIds;
-                const setFunction = isPlayer ? setSelectedPlayerCardIds : setSelectedSystemCardIds;
+                const currentManualSet = isPlayer ? manualPlayerIds : manualSystemIds;
+                const setFunction = isPlayer ? setManualPlayerIds : setManualSystemIds;
 
                 // Jack Logic (Toggle)
-                if (isPlayer && card.type === 'Jack') {
-                    if (currentSet.has(card.id)) {
+                if (card.type === 'Jack') {
+                    if (currentManualSet.has(card.id)) {
                         setFunction(prev => {
                             const newSet = new Set(prev);
                             newSet.delete(card.id);
@@ -575,7 +651,8 @@
                         type: 'JACK',
                         cardId: card.id,
                         isRed: card.color === 'red',
-                        currentValue: jackValues[card.id] || (card.color === 'red' ? -1 : 1)
+                        currentValue: jackValues[card.id] || (card.color === 'red' ? -1 : 1),
+                        isSystem: !isPlayer
                     });
                     return;
                 }
@@ -585,7 +662,8 @@
                     if (newSet.has(card.id)) {
                         newSet.delete(card.id);
                     } else {
-                        if (newSet.size < conditionals.x) {
+                        // Check limit: Manual + Auto <= X
+                        if (newSet.size + conditionals.y < conditionals.x) {
                             newSet.add(card.id);
                         } else {
                              log("Limit Reached. Deselect a card first.", 'neutral');
@@ -597,24 +675,98 @@
 
             const confirmJackValue = (cardId, val) => {
                 setJackValues(prev => ({ ...prev, [cardId]: val }));
+                const isSystem = modal?.isSystem;
                 setModal(null);
                 
-                setSelectedPlayerCardIds(prev => {
-                    if (prev.size < conditionals.x) return new Set(prev).add(cardId);
-                    log("Jack value set. Selection limit reached, Jack not selected automatically.", 'neutral');
+                const setFunction = isSystem ? setManualSystemIds : setManualPlayerIds;
+                const currentSet = isSystem ? manualSystemIds : manualPlayerIds;
+                
+                setFunction(prev => {
+                    if (prev.size + conditionals.y < conditionals.x) return new Set(prev).add(cardId);
+                    log(`${isSystem?'System':'Player'} Jack value set. Limit reached, not selected.`, 'neutral');
                     return prev;
                 });
             };
 
+            // Extracted logic to fill player hand
+            const performPlayerDraw = (currentDeck, currentGraveyard) => {
+                const pSelected = getEffectiveSelectedIds(playerHand, manualPlayerIds, conditionals.y);
+                let nextPHand = playerHand.filter(c => !pSelected.has(c.id));
+                const playNeeded = 5 - nextPHand.length;
+                let drawnForPlayer = [];
+                let playerConflict = null; 
+                let playerInstantFail = false;
+                
+                let tempDeck = [...currentDeck];
+                let tempGrav = [...currentGraveyard];
+
+                const drawOne = () => {
+                    if (tempDeck.length === 0) {
+                        if (tempGrav.length === 0) return null;
+                        tempDeck = shuffleDeck([...tempGrav]);
+                        tempGrav = [];
+                    }
+                    return tempDeck.pop();
+                }
+
+                for(let i=0; i<playNeeded; i++) {
+                    const c = drawOne();
+                    if (c) {
+                        if (c.type === 'Royalty' && c.color === 'red') {
+                             if (nextPHand.some(h => h.type === 'Royalty' && h.color === 'red') || drawnForPlayer.some(h => h.type === 'Royalty' && h.color === 'red')) {
+                                 playerInstantFail = true;
+                             }
+                        }
+                        if (c.type === 'Royalty' && c.color === 'black') {
+                             const existing = nextPHand.find(h => h.type === 'Royalty' && h.color === 'black') || drawnForPlayer.find(h => h.type === 'Royalty' && h.color === 'black');
+                             if (existing) {
+                                 playerConflict = { newCard: c, oldCard: existing };
+                             }
+                        }
+                        drawnForPlayer.push(c);
+                    }
+                }
+
+                if (playerInstantFail) {
+                    log("You drew a duplicate Red Royalty! INSTANT DEFEAT.", 'danger');
+                    setTurnResult({ winner: 'system', detail: "Instant Defeat: Duplicate Red Royalty", playerScore: -1, systemScore: 0, pCards:[], sCards:[] });
+                    setEncounterActive(false); 
+                }
+
+                setGraveyard(uniqueDeck(tempGrav));
+                setMainDeck(uniqueDeck(tempDeck));
+                setPendingPlayerDraw(false);
+                setManualPlayerIds(new Set());
+                
+                if (playerConflict) {
+                    setPlayerHand(uniqueDeck([...nextPHand, ...drawnForPlayer]));
+                    setModal({
+                        type: 'ROYALTY_CONFLICT',
+                        newCard: playerConflict.newCard,
+                        oldCard: playerConflict.oldCard,
+                        isSystem: false
+                    });
+                } else {
+                    setPlayerHand(uniqueDeck([...nextPHand, ...drawnForPlayer]));
+                }
+            };
+
             const endTurn = () => {
-                if (selectedPlayerCardIds.size !== conditionals.x) {
-                    log(`Error: Selected ${selectedPlayerCardIds.size}/${conditionals.x} cards (Auto: ${conditionals.y}).`, 'danger');
+                const pSelected = getEffectiveSelectedIds(playerHand, manualPlayerIds, conditionals.y);
+                const sSelected = getEffectiveSelectedIds(systemHand, manualSystemIds, manualMode ? conditionals.y : conditionals.x);
+
+                if (pSelected.size !== conditionals.x) {
+                    log(`Error: Selected ${pSelected.size}/${conditionals.x} cards (Auto: ${conditionals.y}).`, 'danger');
                     return;
                 }
 
+                const pCards = playerHand.filter(c => pSelected.has(c.id));
+                const sCards = systemHand.filter(c => sSelected.has(c.id));
+                
+                // If System isn't Manual, sSelected might already be autosliced, but filter ensures safety.
+
                 // --- Number Check Mode ---
                 if (manualMode && !encounterActive) {
-                    const pCards = playerHand.filter(c => selectedPlayerCardIds.has(c.id));
                     const pRes = calculateHandScore(pCards, jackValues);
                     const target = parseInt(manualTargetValue);
                     
@@ -639,35 +791,28 @@
                     log(`Check: ${pRes.score} vs ${target}. ${detail}`, winner === 'player' ? 'success' : 'danger');
                     
                     let deck = [...pCards, ...mainDeck];
-                    let newHand = playerHand.filter(c => !selectedPlayerCardIds.has(c.id));
+                    let newHand = playerHand.filter(c => !pSelected.has(c.id));
                     while(newHand.length < 5 && deck.length > 0) newHand.push(deck.pop());
                     setMainDeck(uniqueDeck(deck));
                     setPlayerHand(uniqueDeck(newHand));
-                    setSelectedPlayerCardIds(new Set());
+                    setManualPlayerIds(new Set());
                     return;
                 }
 
                 if (!encounterActive) return;
 
-                const pCards = playerHand.filter(c => selectedPlayerCardIds.has(c.id));
-                const sCards = manualMode 
-                    ? systemHand.filter(c => selectedSystemCardIds.has(c.id))
-                    : systemHand.slice(0, conditionals.x); 
-
                 const pRes = calculateHandScore(pCards, jackValues);
-                const sRes = calculateHandScore(sCards, {}, true); // Pass true for isSystem
+                const sRes = calculateHandScore(sCards, jackValues, true); // System scores
 
                 let pScore = pRes.score;
                 let sScore = sRes.score;
                 
-                // --- Royalty "Full Stop" Logic ---
                 let pFinal = pRes.hasBlackRoyalty ? 0 : pScore;
                 let sFinal = sRes.hasBlackRoyalty ? 0 : sScore;
                 
                 if (pRes.hasRedRoyalty) sFinal = -1; 
                 if (sRes.hasRedRoyalty) pFinal = -1; 
                 
-                // Logs for Royalties
                 if (pRes.hasBlackRoyalty || pRes.hasRedRoyalty) log(`Player uses ${pRes.hasBlackRoyalty ? 'Black' : 'Red'} Royalty!`, 'system');
                 if (sRes.hasBlackRoyalty || sRes.hasRedRoyalty) log(`System uses ${sRes.hasBlackRoyalty ? 'Black' : 'Red'} Royalty!`, 'system');
 
@@ -710,8 +855,7 @@
                 const discard = [...pCards, ...sCards];
                 const newGrav = uniqueDeck([...graveyard, ...discard]);
                 
-                let nextPHand = playerHand.filter(c => !selectedPlayerCardIds.has(c.id));
-                let nextSHand = systemHand.filter(c => !sCards.find(sc => sc.id === c.id));
+                let nextSHand = systemHand.filter(c => !sSelected.has(c.id));
                 
                 let tempDeck = [...mainDeck];
                 let tempGrav = [...newGrav];
@@ -725,12 +869,12 @@
                     return tempDeck.pop();
                 }
 
-                // Fill System First (Check for Red/Black Duplicate)
                 const sysNeeded = 5 - nextSHand.length;
+                let sysConflict = null;
+
                 for(let i=0; i<sysNeeded; i++) {
                     const c = drawOne();
                     if(c) {
-                        // Check RED Duplicate (Failure State)
                         if (c.type === 'Royalty' && c.color === 'red') {
                             if (nextSHand.some(h => h.type === 'Royalty' && h.color === 'red')) {
                                 log("System drew duplicate Red Royalty! Pending Failure.", 'danger');
@@ -738,118 +882,114 @@
                             }
                         }
                         
-                        // Check BLACK Duplicate (Auto-Discard)
                         if (c.type === 'Royalty' && c.color === 'black') {
-                            if (nextSHand.some(h => h.type === 'Royalty' && h.color === 'black')) {
-                                // Discard this one and redraw immediately for this slot
-                                tempGrav.push(c);
-                                i--; // decrement to retry
-                                continue;
+                            const existing = nextSHand.find(h => h.type === 'Royalty' && h.color === 'black');
+                            if (existing) {
+                                if (manualMode) {
+                                    sysConflict = { newCard: c, oldCard: existing };
+                                } else {
+                                    tempGrav.push(c);
+                                    i--; 
+                                    continue;
+                                }
                             }
                         }
-                        
                         nextSHand.push(c);
                     }
                 }
 
-                const playNeeded = 5 - nextPHand.length;
-                const drawnForPlayer = [];
-                let playerConflict = null; 
-                let playerInstantFail = false;
-
-                for(let i=0; i<playNeeded; i++) {
-                    const c = drawOne();
-                    if (c) {
-                        if (c.type === 'Royalty' && c.color === 'red') {
-                             if (nextPHand.some(h => h.type === 'Royalty' && h.color === 'red') || drawnForPlayer.some(h => h.type === 'Royalty' && h.color === 'red')) {
-                                 playerInstantFail = true;
-                             }
-                        }
-                        if (c.type === 'Royalty' && c.color === 'black') {
-                             const existing = nextPHand.find(h => h.type === 'Royalty' && h.color === 'black') || drawnForPlayer.find(h => h.type === 'Royalty' && h.color === 'black');
-                             if (existing) {
-                                 playerConflict = { newCard: c, oldCard: existing };
-                             }
-                        }
-                        drawnForPlayer.push(c);
-                    }
-                }
-
-                if (playerInstantFail) {
-                    log("You drew a duplicate Red Royalty! INSTANT DEFEAT.", 'danger');
-                    setTurnResult({ winner: 'system', detail: "Instant Defeat: Duplicate Red Royalty", playerScore: -1, systemScore: 0, pCards:[], sCards:[] });
-                    setEncounterActive(false); 
-                }
-
-                setGraveyard(uniqueDeck(tempGrav));
-                setMainDeck(uniqueDeck(tempDeck));
                 setSystemHand(uniqueDeck(nextSHand));
-                setSelectedPlayerCardIds(new Set());
-                setSelectedSystemCardIds(new Set());
+                setManualSystemIds(new Set());
                 
-                if (playerConflict) {
-                    setPlayerHand(uniqueDeck([...nextPHand, ...drawnForPlayer]));
-                    setModal({
+                if (sysConflict && manualMode) {
+                     setGraveyard(uniqueDeck(tempGrav));
+                     setMainDeck(uniqueDeck(tempDeck));
+                     setModal({
                         type: 'ROYALTY_CONFLICT',
-                        newCard: playerConflict.newCard,
-                        oldCard: playerConflict.oldCard
-                    });
-                } else {
-                    setPlayerHand(uniqueDeck([...nextPHand, ...drawnForPlayer]));
+                        newCard: sysConflict.newCard,
+                        oldCard: sysConflict.oldCard,
+                        isSystem: true
+                     });
+                     setPendingPlayerDraw(true); 
+                     return; 
                 }
+
+                performPlayerDraw(tempDeck, tempGrav);
             };
 
             const resolveRoyaltyConflict = (keepNew) => {
                 if (!modal || modal.type !== 'ROYALTY_CONFLICT') return;
-                const { newCard, oldCard } = modal;
+                const { newCard, oldCard, isSystem } = modal;
                 const discard = keepNew ? oldCard : newCard;
                 
-                let newHand = playerHand.filter(c => c.id !== discard.id);
+                let targetHand = isSystem ? systemHand : playerHand;
+                let newHand = targetHand.filter(c => c.id !== discard.id);
+                
                 let grav = uniqueDeck([...graveyard, discard]);
                 let deck = [...mainDeck];
                 
                 const res = drawFromDeck(deck, grav, 1);
                 newHand = [...newHand, ...res.drawn];
 
-                setPlayerHand(uniqueDeck(newHand));
+                if (isSystem) setSystemHand(uniqueDeck(newHand));
+                else setPlayerHand(uniqueDeck(newHand));
+                
                 setGraveyard(res.graveyard);
                 setMainDeck(res.deck);
 
-                log(`Resolved Royalty Conflict. Discarded ${discard.label}${discard.suit} and drew replacement.`, 'system');
+                log(`${isSystem?'System':'Player'} Resolved Conflict. Discarded ${discard.label}${discard.suit}.`, isSystem ? 'danger' : 'system');
                 setModal(null);
             };
+            
+            useEffect(() => {
+                if (pendingPlayerDraw && !modal) {
+                     performPlayerDraw(mainDeck, graveyard);
+                }
+            }, [pendingPlayerDraw, modal]); 
 
             // Visibility Logic
             const showPlayerHand = encounterActive || manualMode;
             
-            // Smart Numpad Transitions
             let numpadClass = "";
             if (!manualMode) {
-                numpadClass = "-translate-y-24 opacity-0 pointer-events-none"; // Hidden Up
+                numpadClass = "-translate-y-24 opacity-0 pointer-events-none"; 
             } else if (encounterActive) {
-                numpadClass = "-translate-x-[120%] opacity-0 pointer-events-none"; // Hidden Left (swapped out)
+                numpadClass = "-translate-x-[120%] opacity-0 pointer-events-none"; 
             } else {
-                numpadClass = "translate-x-0 translate-y-0 opacity-100 z-10"; // Visible Center
+                numpadClass = "translate-x-0 translate-y-0 opacity-100 z-10"; 
             }
 
-            // Smart System Hand Transitions
             let sysHandClass = "";
             if (encounterActive) {
-                sysHandClass = "translate-x-0 translate-y-0 opacity-100 z-10"; // Visible Center
+                sysHandClass = "translate-x-0 translate-y-0 opacity-100 z-10"; 
             } else if (manualMode) {
-                sysHandClass = "translate-x-[120%] opacity-0 pointer-events-none"; // Hidden Right (waiting to swap in)
+                sysHandClass = "translate-x-[120%] opacity-0 pointer-events-none"; 
             } else {
-                sysHandClass = "-translate-y-24 opacity-0 pointer-events-none"; // Hidden Up
+                sysHandClass = "-translate-y-24 opacity-0 pointer-events-none"; 
             }
+
+            const pSelectedForRender = getEffectiveSelectedIds(playerHand, manualPlayerIds, conditionals.y);
+            const sSelectedForRender = getEffectiveSelectedIds(systemHand, manualSystemIds, manualMode ? conditionals.y : 0);
 
             return (
                 <div className="min-h-screen wood-texture flex flex-col items-center justify-center p-4 font-sans text-slate-100">
                     <style>{styles}</style>
 
                     {/* --- MODALS --- */}
+                    {modal?.type === 'LIMIT_REACHED' && (
+                        <Modal>
+                            <h3 className="text-xl font-bold mb-4 text-center text-red-500">Limit Reached</h3>
+                            <p className="mb-6 text-center text-sm text-slate-300">
+                                {modal.isSystem ? 'System' : 'Player'} has too many cards selected. 
+                                <br/>Please deselect manual cards before increasing the Auto-Lock limit.
+                            </p>
+                            <button onClick={() => setModal(null)} className="w-full bg-slate-600 py-2 rounded font-bold hover:bg-slate-500">OK</button>
+                        </Modal>
+                    )}
+
                     {modal?.type === 'JACK' && (
                         <Modal>
-                            <h3 className="text-xl font-bold mb-4 text-center">Set Jack Value</h3>
+                            <h3 className={`text-xl font-bold mb-4 text-center ${modal.isSystem ? 'text-red-500' : 'text-white'}`}>{modal.isSystem ? 'System ' : ''}Set Jack Value</h3>
                             <div className="flex items-center justify-center gap-4 mb-6">
                                 <button onClick={() => setModal(p => ({...p, currentValue: modal.isRed ? Math.max(-5, p.currentValue - 1) : Math.max(1, p.currentValue - 1) }))} className="bg-slate-700 w-10 h-10 rounded font-bold text-xl">-</button>
                                 <span className="text-4xl font-mono">{modal.currentValue}</span>
@@ -861,7 +1001,7 @@
                     
                     {modal?.type === 'JACK_AUTO' && (
                         <Modal>
-                            <h3 className="text-xl font-bold mb-4 text-center text-yellow-400">Jack Auto-Selected!</h3>
+                            <h3 className={`text-xl font-bold mb-4 text-center ${modal.isSystem ? 'text-red-500' : 'text-yellow-400'}`}>{modal.isSystem ? 'System ' : ''}Jack Auto-Selected!</h3>
                             <p className="mb-4 text-center text-sm text-slate-300">This Jack was selected by the Auto (Y) limit. Please set its value.</p>
                             <div className="flex items-center justify-center gap-4 mb-6">
                                 <button onClick={() => setModal(p => ({...p, currentValue: modal.isRed ? Math.max(-5, p.currentValue - 1) : Math.max(1, p.currentValue - 1) }))} className="bg-slate-700 w-10 h-10 rounded font-bold text-xl">-</button>
@@ -874,28 +1014,28 @@
 
                     {modal?.type === 'ACE_AUTO' && (
                         <Modal>
-                            <h3 className="text-xl font-bold mb-4 text-center text-yellow-400">Ace Auto-Selected!</h3>
+                            <h3 className={`text-xl font-bold mb-4 text-center ${modal.isSystem ? 'text-red-500' : 'text-yellow-400'}`}>{modal.isSystem ? 'System ' : ''}Ace Auto-Selected!</h3>
                             <p className="mb-6 text-center text-sm text-slate-300">
                                 This Ace was selected by the Auto (Y) limit. 
-                                <br/><span className="font-bold text-white">{modal.card.color === 'black' ? "Play Black Ace to refresh YOUR hand?" : "Play Red Ace to refresh SYSTEM hand?"}</span>
+                                <br/><span className="font-bold text-white">{modal.card.color === 'black' ? `Play Black Ace to refresh ${modal.isSystem?'SYSTEM':'YOUR'} hand?` : `Play Red Ace to refresh ${modal.isSystem?'YOUR':'SYSTEM'} hand?`}</span>
                             </p>
-                            <button onClick={() => handleAceEffect(modal.card)} className="w-full bg-green-600 py-3 rounded font-bold text-lg mb-2">Confirm Play</button>
+                            <button onClick={() => handleAceEffect(modal.card, modal.isSystem ? 'system' : 'player')} className="w-full bg-green-600 py-3 rounded font-bold text-lg mb-2">Confirm Play</button>
                         </Modal>
                     )}
 
                     {modal?.type === 'ACE_MANUAL' && (
                          <Modal>
-                            <h3 className="text-xl font-bold mb-4 text-center text-white">Play Ace Manually?</h3>
+                            <h3 className={`text-xl font-bold mb-4 text-center ${modal.isSystem ? 'text-red-500' : 'text-white'}`}>Play {modal.isSystem ? 'System' : ''} Ace Manually?</h3>
                             <div className="flex flex-col items-center gap-4">
                                 <div className="text-4xl">{modal.card.color === 'black' ? '♠/♣' : '♥/♦'}</div>
                                 <p className="text-center text-sm text-slate-300 mb-2">
                                     {modal.card.color === 'black' 
-                                        ? "This will discard your ENTIRE hand and draw 5 new cards." 
-                                        : "This will discard this card, redraw 1, then discard and redraw the SYSTEM'S hand."}
+                                        ? `This will discard the ${modal.isSystem?'SYSTEM':'PLAYER'} hand and draw 5 new cards.` 
+                                        : `This will discard this card, redraw 1, then discard and redraw the ${modal.isSystem?'PLAYER':'SYSTEM'} hand.`}
                                 </p>
                                 <div className="flex gap-4 w-full">
                                     <button onClick={() => setModal(null)} className="flex-1 bg-slate-600 py-2 rounded font-bold hover:bg-slate-500">Cancel</button>
-                                    <button onClick={() => handleAceEffect(modal.card)} className="flex-1 bg-green-600 py-2 rounded font-bold hover:bg-green-500">Confirm</button>
+                                    <button onClick={() => handleAceEffect(modal.card, modal.isSystem ? 'system' : 'player')} className="flex-1 bg-green-600 py-2 rounded font-bold hover:bg-green-500">Confirm</button>
                                 </div>
                             </div>
                         </Modal>
@@ -903,8 +1043,8 @@
 
                     {modal?.type === 'ROYALTY_CONFLICT' && (
                         <Modal>
-                            <h3 className="text-xl font-bold mb-4 text-center text-red-400">Royalty Conflict!</h3>
-                            <p className="mb-6 text-center text-sm text-slate-300">You can only hold one Black Royalty. Choose which to keep:</p>
+                            <h3 className={`text-xl font-bold mb-4 text-center ${modal.isSystem ? 'text-red-500' : 'text-red-400'}`}>{modal.isSystem ? 'System ' : ''}Royalty Conflict!</h3>
+                            <p className="mb-6 text-center text-sm text-slate-300">Only one Black Royalty allowed. Choose which to keep:</p>
                             <div className="flex gap-4">
                                 <button onClick={() => resolveRoyaltyConflict(false)} className="flex-1 bg-slate-700 p-4 rounded border hover:bg-slate-600">
                                     <div className="text-xs uppercase text-slate-400">Keep Old</div>
@@ -925,17 +1065,17 @@
                             <div className="flex justify-between items-center gap-4">
                                 <span>Total Selected Cards:</span>
                                 <div className="flex items-center gap-2">
-                                    <button onClick={() => setConditionals(p => ({...p, x: Math.max(1, p.x-1), y: Math.min(p.y, Math.max(1, p.x-1))}))} className="bg-slate-700 px-2 rounded">-</button>
+                                    <button onClick={() => changeConditionals('x', -1)} className="bg-slate-700 px-2 rounded">-</button>
                                     <span className="w-4 text-center">{conditionals.x}</span>
-                                    <button onClick={() => setConditionals(p => ({...p, x: Math.min(5, p.x+1)}))} className="bg-slate-700 px-2 rounded">+</button>
+                                    <button onClick={() => changeConditionals('x', 1)} className="bg-slate-700 px-2 rounded">+</button>
                                 </div>
                             </div>
                             <div className="flex justify-between items-center gap-4">
                                 <span>Total Auto-Locked Cards:</span>
                                 <div className="flex items-center gap-2">
-                                    <button onClick={() => setConditionals(p => ({...p, y: Math.max(0, p.y-1)}))} className="bg-slate-700 px-2 rounded">-</button>
+                                    <button onClick={() => changeConditionals('y', -1)} className="bg-slate-700 px-2 rounded">-</button>
                                     <span className="w-4 text-center">{conditionals.y}</span>
-                                    <button onClick={() => setConditionals(p => ({...p, y: Math.min(p.x, p.y+1)}))} className="bg-slate-700 px-2 rounded">+</button>
+                                    <button onClick={() => changeConditionals('y', 1)} className="bg-slate-700 px-2 rounded">+</button>
                                 </div>
                             </div>
                         </div>
@@ -967,7 +1107,7 @@
                              <div className={`absolute bottom-4 w-full flex justify-center transition-all duration-700 ease-in-out transform ${sysHandClass}`}>
                                 <div className="flex gap-4 p-4 bg-black/20 rounded-xl backdrop-blur-sm border border-white/10">
                                     {systemHand.map((card, idx) => (
-                                        <Card key={card.id} card={card} isFaceUp={encounterActive && manualMode} isSelected={selectedSystemCardIds.has(card.id)} onClick={() => handleCardSelect(card, false)} canSelect={manualMode && encounterActive} />
+                                        <Card key={card.id} card={card} isFaceUp={encounterActive && manualMode} isSelected={sSelectedForRender.has(card.id)} onClick={() => handleCardSelect(card, false)} canSelect={manualMode && encounterActive} />
                                     ))}
                                     {systemHand.length === 0 && <div className="text-white/50 italic">System Hand Empty</div>}
                                 </div>
@@ -1032,7 +1172,7 @@
                                     {playerHand.map((card, idx) => (
                                         <Card 
                                             key={card.id} card={card} 
-                                            isSelected={selectedPlayerCardIds.has(card.id)} 
+                                            isSelected={pSelectedForRender.has(card.id)} 
                                             isLocked={idx < conditionals.y} 
                                             onClick={() => handleCardSelect(card, true)} 
                                             customValue={jackValues[card.id]}
